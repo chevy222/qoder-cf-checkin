@@ -216,15 +216,65 @@ Qoder 没有公开的 OAuth 登录流程，所以需要手动从 Qoder 桌面端
 
 ### 8.1 取出 Token
 
-在装有 Qoder 桌面端的 Windows 上，用 [qoder_claim.py](https://github.com/sunp-1/qoder-checkin) 读取本机登录态（只读不写）：
+在装有 Qoder 桌面端的 Windows 上打开 PowerShell 7（`pwsh`），把下面整段复制进去回车（只读本机登录态，不写任何文件）：
 
 ```powershell
-python -c "import qoder_claim; s=qoder_claim.read_local_session(); print('TOKEN:' + s['token']); print('REFRESH:' + s['refreshToken'])"
+& {
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Dpapi {
+    [StructLayout(LayoutKind.Sequential)] struct BLOB { public int cb; public IntPtr pb; }
+    [DllImport("crypt32.dll", SetLastError=true)] static extern bool CryptUnprotectData(ref BLOB i, IntPtr d, IntPtr e, IntPtr r, IntPtr p, int f, ref BLOB o);
+    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr m);
+    public static byte[] Unprotect(byte[] data) {
+        var bi = new BLOB { cb = data.Length, pb = Marshal.AllocHGlobal(data.Length) };
+        Marshal.Copy(data, 0, bi.pb, data.Length);
+        var bo = new BLOB();
+        if (!CryptUnprotectData(ref bi, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, 1, ref bo)) {
+            Marshal.FreeHGlobal(bi.pb); throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+        Marshal.FreeHGlobal(bi.pb);
+        var r = new byte[bo.cb]; Marshal.Copy(bo.pb, r, 0, bo.cb); LocalFree(bo.pb); return r;
+    }
+}
+"@
+
+$dirs = Get-ChildItem $env:APPDATA -Filter "com.qoder.app.*" -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+if (-not $dirs) { throw "没找到 $env:APPDATA\com.qoder.app.*，Qoder 桌面端装过吗？" }
+
+$sess = $null
+foreach ($d in $dirs) {
+    $af = Join-Path $d.FullName "auth.v1.dat"
+    $sf = Join-Path $d.FullName "Local State"
+    if (-not (Test-Path $af) -or -not (Test-Path $sf)) { continue }
+    try {
+        $raw = [IO.File]::ReadAllBytes($af)
+        if ($raw.Length -lt 60 -or [Text.Encoding]::ASCII.GetString($raw, 0, 3) -ne "v10") { continue }
+        $st = Get-Content $sf -Raw -Encoding UTF8 | ConvertFrom-Json
+        $ek = [Convert]::FromBase64String($st.os_crypt.encrypted_key)
+        $key = [Dpapi]::Unprotect($ek[5..($ek.Length - 1)])
+        $nonce = $raw[3..14]
+        $ct = $raw[15..($raw.Length - 17)]
+        $tag = $raw[($raw.Length - 16)..($raw.Length - 1)]
+        $pt = New-Object byte[] $ct.Length
+        $gcm = [System.Security.Cryptography.AesGcm]::new($key)
+        $gcm.Decrypt($nonce, $ct, $tag, $pt)
+        $sess = [Text.Encoding]::UTF8.GetString($pt) | ConvertFrom-Json
+        if ($sess.token) { Write-Host "已读取：$($d.Name)（有效期至 $($sess.expiresAt)）"; break }
+    } catch { continue }
+}
+if (-not $sess -or -not $sess.token) { throw "所有 Qoder 目录都解不出登录态" }
+
+Write-Host ""
+Write-Host "TOKEN:$($sess.token)"
+Write-Host "REFRESH:$($sess.refreshToken)"
+}
 ```
 
 把输出的 `TOKEN:` 和 `REFRESH:` 后面的值记下来（这是你的登录凭据，**不要分享给别人、不要提交到 git**）。
 
-> 如果没有 Python，也可以在 Qoder 客户端里抓包取 token，但用上面的命令最省事。`qoder_claim.py` 零第三方依赖，Python ≥ 3.8 即可。
+> 原理：Qoder 桌面端用 Electron safeStorage 存登录态——AES 密钥经 Windows DPAPI 加密存在 `Local State` 的 `os_crypt.encrypted_key`，凭据本身 AES-256-GCM 加密存在 `auth.v1.dat`。上面的脚本用 DPAPI 解出密钥再 GCM 解密，全程不联网、不写文件。
 
 ### 8.2 录入到 Worker
 
