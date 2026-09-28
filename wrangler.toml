@@ -10,4 +10,4 @@ crons = ["1 2 * * *"]
 
 [[kv_namespaces]]
 binding = "KV"
-id = "替换成你的 KV Namespace ID"
+id = "9c9cc8ed172e455db0c96af14a503463"
