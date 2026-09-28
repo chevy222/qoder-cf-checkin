@@ -80,12 +80,12 @@ Cloudflare Worker 运行在云端，**无法运行 Windows exe**（Qoder 客户�
 
 ### 运行以下命令提取设备标识
 
-在装有 Qoder 桌面端的 Windows 上打开 PowerShell 7（`pwsh`），把下面整段复制进去回车。**如果 Qoder 装在非默认位置，先把第二行的 `#` 去掉并改成你的路径。**
+在装有 Qoder 桌面端的 Windows 上打开 PowerShell 7（`pwsh`），把下面整段复制进去回车。**如果 Qoder 装在非默认位置，把第二行引号里改成你的安装路径；默认安装留空即可自动查找。**
 
 ```powershell
 & {
-# 如果 Qoder 装在非默认位置（如 D:\Program\Qoder CN），取消下面这行注释并改成你的路径：
-# $qoderRoot = "D:\Program\Qoder CN"
+# 非默认安装路径填这里（如 "D:\Program\Qoder CN"），默认安装留空 ""
+$qoderRoot = ""
 
 # 1. 自动找 Qoder 安装目录（默认位置 / 注册表 / 正在运行的进程，三条路都试）
 if (-not $qoderRoot) {
@@ -103,7 +103,7 @@ if (-not $qoderRoot) {
   $proc = Get-Process -Name "Qoder" -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($proc) { $qoderRoot = Split-Path $proc.Path -Parent }
 }
-if (-not $qoderRoot) { throw "未找到 Qoder 安装目录，请在脚本顶部取消注释 $qoderRoot 并手动填写路径" }
+if (-not $qoderRoot) { throw "未找到 Qoder 安装目录，请在脚本第二行填写你的安装路径" }
 
 # 2. 运行 Qoder 自带的 runtime-info.exe（只读不写，客户端自己每小时也在跑它）
 $umidExe = Join-Path $qoderRoot "resources\umid\runtime-info.exe"
@@ -145,7 +145,7 @@ Write-Host "==================================================" -ForegroundColor
 ```
 
 命令会自动：
-- 查找 Qoder 安装目录（默认位置 / 注册表 / 正在运行的进程，三条路都试）；如果装在非默认位置，在脚本顶部取消注释 `$qoderRoot = "..."` 手动指定即可；
+- 查找 Qoder 安装目录（默认位置 / 注册表 / 正在运行的进程，三条路都试）；如果装在非默认位置，在脚本第二行填写路径即可；
 - 运行 Qoder 自带的 `resources\umid\runtime-info.exe --account-stdin`（客户端自己每小时也在跑它，**只读不写**）；
 - 读取 `resources\build-manifest.json` 的版本号、`%APPDATA%\com.qoder.app.*\auth.machine-id`；
 - 输出一张表，把值逐个填到 Cloudflare 即可。
