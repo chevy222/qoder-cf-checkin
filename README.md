@@ -17,10 +17,10 @@
 2. [第一步：创建 Worker 并粘贴代码](#2-第一步创建-worker-并粘贴代码)
 3. [第二步：创建 KV 并绑定](#3-第二步创建-kv-并绑定)
 4. [第三步：设置管理口令 ADMIN_TOKEN](#4-第三步设置管理口令-admin_token)
-5. [第四步：提取设备标识（关键）](#5-第四步提取设备标识关键)
+5. [第四步：提取设备标识和 Token（关键）](#5-第四步提取设备标识和-token关键)
 6. [第五步：配置设备标识环境变量](#6-第五步配置设备标识环境变量)
 7. [第六步：配置定时 Cron](#7-第六步配置定时-cron)
-8. [第七步：取出 Token 并录入账号](#8-第七步取出-token-并录入账号)
+8. [第七步：录入账号](#8-第七步录入账号)
 9. [第八步：手动试跑并查看日志](#9-第八步手动试跑并查看日志)
 10. [接口一览](#10-接口一览)
 11. [日常运维与常见问题](#11-日常运维与常见问题)
@@ -72,41 +72,47 @@ KV 是 Cloudflare 的键值存储，用来存凭证、运行状态和日志。
 
 ---
 
-## 5. 第四步：提取设备标识（关键）
+## 5. 第四步：提取设备标识和 Token（关键）
 
 这是**最容易踩坑、也最关键**的一步。2026-09-26 起，Qoder 服务端要求请求携带一组 `Cosy-*` 设备头才下发每日活动；缺了这些头（特别是 `Cosy-ClientType: 10`），活动列表会直接返回空。
 
 Cloudflare Worker 运行在云端，**无法运行 Windows exe**（Qoder 客户端用 `runtime-info.exe` 生成设备标识），所以需要在装有 Qoder 客户端的 Windows 机器上**一次性提取**，再配到 Worker 的环境变量里。
 
-### 运行以下命令提取设备标识
+### 运行以下命令一次性提取设备标识和 Token
 
-在装有 Qoder 桌面端的 Windows 上打开 PowerShell 7（`pwsh`），把下面整段复制进去回车。**如果 Qoder 装在非默认位置，把第二行引号里改成你的安装路径；默认安装留空即可自动查找。**
+在装有 Qoder 桌面端的 Windows 上打开 PowerShell 7（`pwsh`），把下面整段复制进去。**先把第二行 `$qoderRoot` 改成你的 Qoder 安装目录（就是包含 `Qoder CN.exe` 的那个文件夹），再回车。**
 
 ```powershell
 & {
-# 非默认安装路径填这里（如 "D:\Program\Qoder CN"），默认安装留空 ""
+# 必填：Qoder 安装目录（包含 Qoder CN.exe 的文件夹，如 "D:\Program\Qoder CN"）
 $qoderRoot = ""
 
-# 1. 自动找 Qoder 安装目录（默认位置 / 注册表 / 正在运行的进程，三条路都试）
-if (-not $qoderRoot) {
-  foreach ($p in @("$env:LOCALAPPDATA\Programs\Qoder", "$env:ProgramFiles\Qoder", "${env:ProgramFiles(x86)}\Qoder")) {
-    if ($p -and (Test-Path (Join-Path $p "resources\umid\runtime-info.exe"))) { $qoderRoot = $p; break }
-  }
-}
-if (-not $qoderRoot) {
-  $reg = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*","HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*","HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue |
-    Where-Object { $_.DisplayName -match "Qoder" -and $_.InstallLocation -and (Test-Path (Join-Path $_.InstallLocation "resources\umid\runtime-info.exe")) } |
-    Select-Object -First 1
-  if ($reg) { $qoderRoot = $reg.InstallLocation }
-}
-if (-not $qoderRoot) {
-  $proc = Get-Process -Name "Qoder" -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($proc) { $qoderRoot = Split-Path $proc.Path -Parent }
-}
-if (-not $qoderRoot) { throw "未找到 Qoder 安装目录，请在脚本第二行填写你的安装路径" }
+if (-not $qoderRoot) { throw "请先设置 `$qoderRoot 为你的 Qoder 安装目录（包含 Qoder CN.exe 的文件夹）" }
 
-# 2. 运行 Qoder 自带的 runtime-info.exe（只读不写，客户端自己每小时也在跑它）
+# DPAPI 解密辅助（用于解 Token）
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Dpapi {
+    [StructLayout(LayoutKind.Sequential)] struct BLOB { public int cb; public IntPtr pb; }
+    [DllImport("crypt32.dll", SetLastError=true)] static extern bool CryptUnprotectData(ref BLOB i, IntPtr d, IntPtr e, IntPtr r, IntPtr p, int f, ref BLOB o);
+    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr m);
+    public static byte[] Unprotect(byte[] data) {
+        var bi = new BLOB { cb = data.Length, pb = Marshal.AllocHGlobal(data.Length) };
+        Marshal.Copy(data, 0, bi.pb, data.Length);
+        var bo = new BLOB();
+        if (!CryptUnprotectData(ref bi, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, 1, ref bo)) {
+            Marshal.FreeHGlobal(bi.pb); throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+        Marshal.FreeHGlobal(bi.pb);
+        var r = new byte[bo.cb]; Marshal.Copy(bo.pb, r, 0, bo.cb); LocalFree(bo.pb); return r;
+    }
+}
+"@
+
+# 1. runtime-info.exe（设备标识）
 $umidExe = Join-Path $qoderRoot "resources\umid\runtime-info.exe"
+if (-not (Test-Path $umidExe)) { throw "找不到 $umidExe，请检查 `$qoderRoot 是否正确" }
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = $umidExe; $psi.Arguments = "--account-stdin"
 $psi.UseShellExecute = $false; $psi.RedirectStandardInput = $true
@@ -117,19 +123,43 @@ $out = $p.StandardOutput.ReadToEnd()
 $p.WaitForExit(40000) | Out-Null
 $ri = ($out -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 1) | ConvertFrom-Json
 
-# 3. 读版本号和 machine-id
+# 2. 版本号
 $cosyVersion = ""
 $mf = Join-Path $qoderRoot "resources\build-manifest.json"
 if (Test-Path $mf) { try { $cosyVersion = [string]((Get-Content $mf -Raw | ConvertFrom-Json).productVersion) } catch {} }
-$cosyMachineId = ""
-$midDir = Get-ChildItem -Path $env:APPDATA -Filter "com.qoder.app.*" -Directory -ErrorAction SilentlyContinue |
+
+# 3. 找 %APPDATA%\com.qoder.app.*（machine-id 和 Token 都在这个目录）
+$appDir = Get-ChildItem $env:APPDATA -Filter "com.qoder.app.*" -Directory -ErrorAction SilentlyContinue |
   Sort-Object LastWriteTime -Descending |
-  Where-Object { Test-Path (Join-Path $_.FullName "auth.machine-id") } |
+  Where-Object { Test-Path (Join-Path $_.FullName "auth.v1.dat") } |
   Select-Object -First 1
-if ($midDir) { $cosyMachineId = (Get-Content (Join-Path $midDir.FullName "auth.machine-id") -Raw).Trim() }
+if (-not $appDir) { throw "没找到 $env:APPDATA\com.qoder.app.*\auth.v1.dat，Qoder 桌面端登录过吗？" }
+
+# 4. machine-id
+$cosyMachineId = ""
+$midFile = Join-Path $appDir.FullName "auth.machine-id"
+if (Test-Path $midFile) { $cosyMachineId = (Get-Content $midFile -Raw).Trim() }
+
+# 5. 架构
 $arch = if ($env:PROCESSOR_ARCHITECTURE -match "ARM|arm64|aarch64") { "aarch64" } else { "x86_64" }
 
-# 4. 输出结果（把下面这些值逐个填到 Cloudflare 环境变量里）
+# 6. Token 解密（DPAPI + AES-256-GCM，Electron safeStorage 标准格式）
+$sess = $null
+try {
+    $raw = [IO.File]::ReadAllBytes((Join-Path $appDir.FullName "auth.v1.dat"))
+    if ($raw.Length -ge 60 -and [Text.Encoding]::ASCII.GetString($raw, 0, 3) -eq "v10") {
+        $st = Get-Content (Join-Path $appDir.FullName "Local State") -Raw -Encoding UTF8 | ConvertFrom-Json
+        $ek = [Convert]::FromBase64String($st.os_crypt.encrypted_key)
+        $key = [Dpapi]::Unprotect($ek[5..($ek.Length - 1)])
+        $nonce = $raw[3..14]; $ct = $raw[15..($raw.Length - 17)]; $tag = $raw[($raw.Length - 16)..($raw.Length - 1)]
+        $pt = New-Object byte[] $ct.Length
+        $gcm = [System.Security.Cryptography.AesGcm]::new($key)
+        $gcm.Decrypt($nonce, $ct, $tag, $pt)
+        $sess = [Text.Encoding]::UTF8.GetString($pt) | ConvertFrom-Json
+    }
+} catch {}
+
+# === 输出设备标识 ===
 Write-Host ""
 Write-Host "====== 设备标识（复制到 Cloudflare 环境变量）======" -ForegroundColor Green
 Write-Host "COSY_CLIENT_TYPE      = 10"
@@ -141,16 +171,27 @@ if ($ri.machineToken) { Write-Host "COSY_MACHINE_TOKEN    = $($ri.machineToken)"
 if ($ri.machineCode)  { Write-Host "COSY_MACHINE_CODE     = $($ri.machineCode)" }
 if ($ri.machineType)  { Write-Host "COSY_MACHINE_TYPE     = $($ri.machineType)" }
 Write-Host "==================================================" -ForegroundColor Green
+
+# === 输出 Token ===
+if ($sess -and $sess.token) {
+    Write-Host ""
+    Write-Host "====== 登录凭据（后面录入账号用）======" -ForegroundColor Cyan
+    Write-Host "已读取：$($appDir.Name)（有效期至 $($sess.expiresAt)）"
+    Write-Host "TOKEN:$($sess.token)"
+    Write-Host "REFRESH:$($sess.refreshToken)"
+    Write-Host "======================================" -ForegroundColor Cyan
+} else {
+    Write-Host ""
+    Write-Host "（Token 解密失败，可检查 Qoder 是否处于登录状态）" -ForegroundColor Yellow
+}
 }
 ```
 
-命令会自动：
-- 查找 Qoder 安装目录（默认位置 / 注册表 / 正在运行的进程，三条路都试）；如果装在非默认位置，在脚本第二行填写路径即可；
-- 运行 Qoder 自带的 `resources\umid\runtime-info.exe --account-stdin`（客户端自己每小时也在跑它，**只读不写**）；
-- 读取 `resources\build-manifest.json` 的版本号、`%APPDATA%\com.qoder.app.*\auth.machine-id`；
-- 输出一张表，把值逐个填到 Cloudflare 即可。
+命令会输出两部分：
+- **设备标识（COSY_*）**→ 下一步配到 Cloudflare 环境变量；
+- **登录凭据（TOKEN / REFRESH）**→ 后面录入账号用。
 
-输出的变量包括：
+设备标识变量说明：
 
 | 变量名 | 来源 | 说明 |
 | --- | --- | --- |
@@ -210,81 +251,17 @@ Cron 表达式按 **UTC 时间**执行，北京时间 = UTC+8（UTC 小时 = 北
 
 ---
 
-## 8. 第七步：取出 Token 并录入账号
+## 8. 第七步：录入账号
 
-Qoder 没有公开的 OAuth 登录流程，所以需要手动从 Qoder 桌面端取出 `token` 和 `refreshToken`，再通过 `/add` 接口录入 Worker。
+第四步已经取出了 `TOKEN` 和 `REFRESH`，直接录入 Worker 即可。
 
-### 8.1 取出 Token
-
-在装有 Qoder 桌面端的 Windows 上打开 PowerShell 7（`pwsh`），把下面整段复制进去回车（只读本机登录态，不写任何文件）：
-
-```powershell
-& {
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class Dpapi {
-    [StructLayout(LayoutKind.Sequential)] struct BLOB { public int cb; public IntPtr pb; }
-    [DllImport("crypt32.dll", SetLastError=true)] static extern bool CryptUnprotectData(ref BLOB i, IntPtr d, IntPtr e, IntPtr r, IntPtr p, int f, ref BLOB o);
-    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr m);
-    public static byte[] Unprotect(byte[] data) {
-        var bi = new BLOB { cb = data.Length, pb = Marshal.AllocHGlobal(data.Length) };
-        Marshal.Copy(data, 0, bi.pb, data.Length);
-        var bo = new BLOB();
-        if (!CryptUnprotectData(ref bi, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, 1, ref bo)) {
-            Marshal.FreeHGlobal(bi.pb); throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-        }
-        Marshal.FreeHGlobal(bi.pb);
-        var r = new byte[bo.cb]; Marshal.Copy(bo.pb, r, 0, bo.cb); LocalFree(bo.pb); return r;
-    }
-}
-"@
-
-$dirs = Get-ChildItem $env:APPDATA -Filter "com.qoder.app.*" -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
-if (-not $dirs) { throw "没找到 $env:APPDATA\com.qoder.app.*，Qoder 桌面端装过吗？" }
-
-$sess = $null
-foreach ($d in $dirs) {
-    $af = Join-Path $d.FullName "auth.v1.dat"
-    $sf = Join-Path $d.FullName "Local State"
-    if (-not (Test-Path $af) -or -not (Test-Path $sf)) { continue }
-    try {
-        $raw = [IO.File]::ReadAllBytes($af)
-        if ($raw.Length -lt 60 -or [Text.Encoding]::ASCII.GetString($raw, 0, 3) -ne "v10") { continue }
-        $st = Get-Content $sf -Raw -Encoding UTF8 | ConvertFrom-Json
-        $ek = [Convert]::FromBase64String($st.os_crypt.encrypted_key)
-        $key = [Dpapi]::Unprotect($ek[5..($ek.Length - 1)])
-        $nonce = $raw[3..14]
-        $ct = $raw[15..($raw.Length - 17)]
-        $tag = $raw[($raw.Length - 16)..($raw.Length - 1)]
-        $pt = New-Object byte[] $ct.Length
-        $gcm = [System.Security.Cryptography.AesGcm]::new($key)
-        $gcm.Decrypt($nonce, $ct, $tag, $pt)
-        $sess = [Text.Encoding]::UTF8.GetString($pt) | ConvertFrom-Json
-        if ($sess.token) { Write-Host "已读取：$($d.Name)（有效期至 $($sess.expiresAt)）"; break }
-    } catch { continue }
-}
-if (-not $sess -or -not $sess.token) { throw "所有 Qoder 目录都解不出登录态" }
-
-Write-Host ""
-Write-Host "TOKEN:$($sess.token)"
-Write-Host "REFRESH:$($sess.refreshToken)"
-}
-```
-
-把输出的 `TOKEN:` 和 `REFRESH:` 后面的值记下来（这是你的登录凭据，**不要分享给别人、不要提交到 git**）。
-
-> 原理：Qoder 桌面端用 Electron safeStorage 存登录态——AES 密钥经 Windows DPAPI 加密存在 `Local State` 的 `os_crypt.encrypted_key`，凭据本身 AES-256-GCM 加密存在 `auth.v1.dat`。上面的脚本用 DPAPI 解出密钥再 GCM 解密，全程不联网、不写文件。
-
-### 8.2 录入到 Worker
-
-打开 PowerShell，初始化变量（把地址和口令替换成你自己的，地址结尾不要带斜杠）：
+打开 PowerShell，初始化变量（把地址和口令替换成你自己的，地址结尾不要带斜杠；token 和 refreshToken 填第四步输出的值）：
 
 ```powershell
 $base  = "https://qoder-checkin.你的子域.workers.dev"
 $token = "你自己设定的管理口令"
-$accessToken = "上一步取出的 token"
-$refreshToken = "上一步取出的 refreshToken"
+$accessToken = "第四步输出的 TOKEN"
+$refreshToken = "第四步输出的 REFRESH"
 ```
 
 录入账号：
@@ -334,7 +311,7 @@ Invoke-RestMethod -Uri "$base/add" -Method Post `
 **首先怀疑设备标识过期。** 特别是 `Cosy-MachineToken` 如果是短期动态令牌，过期后服务端会拒绝下发活动。
 
 排查步骤：
-1. 在 Windows 上重新运行[第五步](#5-第四步提取设备标识关键)里的那段 PowerShell 命令，对比新值和旧值（特别是 `COSY_MACHINE_TOKEN`）。
+1. 在 Windows 上重新运行[第四步](#5-第四步提取设备标识和-token关键)里的那段 PowerShell 命令，对比新值和旧值（特别是 `COSY_MACHINE_TOKEN`）。
 2. 如果值变了，更新 Worker 的环境变量并重新部署。
 3. 部署后访问 `$base/run` 验证。
 
@@ -342,7 +319,7 @@ Invoke-RestMethod -Uri "$base/add" -Method Post `
 
 ### Token 失效 / 401
 
-Worker 会在 Token 过期前 72 小时自动续期，遇到 401 也会即时刷新。如果刷新失败（refreshToken 也失效了），`/status` 会显示「需重新登录」，此时需要重新走[第八步](#8-第七步取出-token-并录入账号)取出新 token 并 `/add` 更新。
+Worker 会在 Token 过期前 72 小时自动续期，遇到 401 也会即时刷新。如果刷新失败（refreshToken 也失效了），`/status` 会显示「需重新登录」，此时需要重新走[第四步](#5-第四步提取设备标识和-token关键)取出新 token 并 `/add` 更新。
 
 也可以手动触发刷新：`Invoke-RestMethod -Uri "$base/refresh" -Headers @{ "X-Admin-Token" = $token }`。
 
