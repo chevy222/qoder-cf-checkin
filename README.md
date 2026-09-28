@@ -7,7 +7,7 @@
 - 运行日志存在 KV，浏览器打开 `/logs` 就能看，保留 30 天；日志会标注是**定时触发**还是**手动跑的**；
 - 定时任务带独立心跳，首页与 `/status` 一眼看出"上次 Cron 什么时候跑的"；
 - 支持多账号（录入几个就自动签几个）；
-- 设备标识（Cosy-* 请求头）由本机 PowerShell 脚本一次性提取，配成 Cloudflare 环境变量。
+- 设备标识（Cosy-* 请求头）由本机 PowerShell 命令一次性提取，配成 Cloudflare 环境变量。
 
 ---
 
@@ -78,33 +78,73 @@ KV 是 Cloudflare 的键值存储，用来存凭证、运行状态和日志。
 
 Cloudflare Worker 运行在云端，**无法运行 Windows exe**（Qoder 客户端用 `runtime-info.exe` 生成设备标识），所以需要在装有 Qoder 客户端的 Windows 机器上**一次性提取**，再配到 Worker 的环境变量里。
 
-### 运行提取脚本
+### 运行以下命令提取设备标识
 
-在装有 Qoder 桌面端的 Windows 上打开 PowerShell 7（`pwsh`），进入本脚本所在目录：
+在装有 Qoder 桌面端的 Windows 上打开 PowerShell 7（`pwsh`），把下面整段复制进去回车：
 
 ```powershell
-pwsh ./extract-device.ps1
+# 1. 找 Qoder 安装目录（默认位置 / 注册表 / 正在运行的进程，三条路都试）
+$qoderRoot = $null
+foreach ($p in @("$env:LOCALAPPDATA\Programs\Qoder", "$env:ProgramFiles\Qoder", "${env:ProgramFiles(x86)}\Qoder")) {
+  if ($p -and (Test-Path (Join-Path $p "resources\umid\runtime-info.exe"))) { $qoderRoot = $p; break }
+}
+if (-not $qoderRoot) {
+  $reg = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*","HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*","HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue |
+    Where-Object { $_.DisplayName -match "Qoder" -and $_.InstallLocation -and (Test-Path (Join-Path $_.InstallLocation "resources\umid\runtime-info.exe")) } |
+    Select-Object -First 1
+  if ($reg) { $qoderRoot = $reg.InstallLocation }
+}
+if (-not $qoderRoot) {
+  $proc = Get-Process -Name "Qoder" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($proc) { $qoderRoot = Split-Path $proc.Path -Parent }
+}
+if (-not $qoderRoot) { throw "未找到 Qoder 安装目录，请确认已安装 Qoder 桌面端" }
+
+# 2. 运行 Qoder 自带的 runtime-info.exe（只读不写，客户端自己每小时也在跑它）
+$umidExe = Join-Path $qoderRoot "resources\umid\runtime-info.exe"
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = $umidExe; $psi.Arguments = "--account-stdin"
+$psi.UseShellExecute = $false; $psi.RedirectStandardInput = $true
+$psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.CreateNoWindow = $true
+$p = [System.Diagnostics.Process]::Start($psi)
+$p.StandardInput.Close() | Out-Null
+$out = $p.StandardOutput.ReadToEnd()
+$p.WaitForExit(40000) | Out-Null
+$ri = ($out -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 1) | ConvertFrom-Json
+
+# 3. 读版本号和 machine-id
+$cosyVersion = ""
+$mf = Join-Path $qoderRoot "resources\build-manifest.json"
+if (Test-Path $mf) { try { $cosyVersion = [string]((Get-Content $mf -Raw | ConvertFrom-Json).productVersion) } catch {} }
+$cosyMachineId = ""
+$midDir = Get-ChildItem -Path $env:APPDATA -Filter "com.qoder.app.*" -Directory -ErrorAction SilentlyContinue |
+  Sort-Object LastWriteTime -Descending |
+  Where-Object { Test-Path (Join-Path $_.FullName "auth.machine-id") } |
+  Select-Object -First 1
+if ($midDir) { $cosyMachineId = (Get-Content (Join-Path $midDir.FullName "auth.machine-id") -Raw).Trim() }
+$arch = if ($env:PROCESSOR_ARCHITECTURE -match "ARM|arm64|aarch64") { "aarch64" } else { "x86_64" }
+
+# 4. 输出结果（把下面这些值逐个填到 Cloudflare 环境变量里）
+Write-Host ""
+Write-Host "====== 设备标识（复制到 Cloudflare 环境变量）======" -ForegroundColor Green
+Write-Host "COSY_CLIENT_TYPE      = 10"
+Write-Host "COSY_MACHINE_OS       = ${arch}_windows"
+Write-Host "COSY_MACHINE_HOSTNAME  = $env:COMPUTERNAME"
+if ($cosyVersion)     { Write-Host "COSY_VERSION          = $cosyVersion" }
+if ($cosyMachineId)   { Write-Host "COSY_MACHINE_ID       = $cosyMachineId" }
+if ($ri.machineToken) { Write-Host "COSY_MACHINE_TOKEN    = $($ri.machineToken)" }
+if ($ri.machineCode)  { Write-Host "COSY_MACHINE_CODE     = $($ri.machineCode)" }
+if ($ri.machineType)  { Write-Host "COSY_MACHINE_TYPE     = $($ri.machineType)" }
+Write-Host "==================================================" -ForegroundColor Green
 ```
 
-脚本会自动：
+命令会自动：
 - 查找 Qoder 安装目录（默认位置 / 注册表 / 正在运行的进程，三条路都试）；
 - 运行 Qoder 自带的 `resources\umid\runtime-info.exe --account-stdin`（客户端自己每小时也在跑它，**只读不写**）；
 - 读取 `resources\build-manifest.json` 的版本号、`%APPDATA%\com.qoder.app.*\auth.machine-id`；
-- 输出一张表 + 完整 JSON。
+- 输出一张表，把值逐个填到 Cloudflare 即可。
 
-如果 Qoder 装在非默认位置，用 `-QoderPath` 指定：
-
-```powershell
-pwsh ./extract-device.ps1 -QoderPath "D:\Program\Qoder"
-```
-
-只想要 JSON（方便复制）：
-
-```powershell
-pwsh ./extract-device.ps1 -Json
-```
-
-脚本输出的变量包括：
+输出的变量包括：
 
 | 变量名 | 来源 | 说明 |
 | --- | --- | --- |
@@ -117,13 +157,13 @@ pwsh ./extract-device.ps1 -Json
 | `COSY_MACHINE_ID` | auth.machine-id 文件 | |
 | `COSY_VERSION` | build-manifest.json | 客户端版本号 |
 
-> **设备标识的有效期是本方案唯一的不确定性。** 如果 `Cosy-MachineToken` 是长期有效的，配置一次即可一直用；如果它会过期，活动列表会突然变空，届时重新运行本脚本提取并更新环境变量即可。详见[常见问题](#11-日常运维与常见问题)。
+> **设备标识的有效期是本方案唯一的不确定性。** 如果 `Cosy-MachineToken` 是长期有效的，配置一次即可一直用；如果它会过期，活动列表会突然变空，届时重新运行上面的命令提取并更新环境变量即可。详见[常见问题](#11-日常运维与常见问题)。
 
 ---
 
 ## 6. 第五步：配置设备标识环境变量
 
-把上一步脚本输出的所有变量配到 Worker 里：
+把上一步命令输出的所有变量配到 Worker 里：
 
 1. Worker → **Settings** → **Variables and Secrets** → **Add**。
 2. 逐个添加：
@@ -131,7 +171,7 @@ pwsh ./extract-device.ps1 -Json
    - 其余（`COSY_CLIENT_TYPE`、`COSY_MACHINE_CODE`、`COSY_MACHINE_TYPE`、`COSY_MACHINE_OS`、`COSY_MACHINE_HOSTNAME`、`COSY_MACHINE_ID`、`COSY_VERSION`）可选 **Variable（明文）**，不敏感。
 3. 全部加完后**重新部署一次** Worker。
 
-> 如果你用 wrangler CLI 部署，可以运行 `pwsh ./extract-device.ps1 -Wrangler` 输出 `[vars]` 格式，贴进 `wrangler.toml`；但 `COSY_MACHINE_TOKEN` 仍建议用 `wrangler secret put COSY_MACHINE_TOKEN` 单独设为 secret，不要写进配置文件。
+> 如果你用 wrangler CLI 部署，可以把上面的值写进 `wrangler.toml` 的 `[vars]` 段；但 `COSY_MACHINE_TOKEN` 仍建议用 `wrangler secret put COSY_MACHINE_TOKEN` 单独设为 secret，不要写进配置文件。
 
 ---
 
@@ -238,7 +278,7 @@ Invoke-RestMethod -Uri "$base/add" -Method Post `
 **首先怀疑设备标识过期。** 特别是 `Cosy-MachineToken` 如果是短期动态令牌，过期后服务端会拒绝下发活动。
 
 排查步骤：
-1. 在 Windows 上重新运行 `pwsh ./extract-device.ps1`，对比新值和旧值（特别是 `COSY_MACHINE_TOKEN`）。
+1. 在 Windows 上重新运行[第五步](#5-第四步提取设备标识关键)里的那段 PowerShell 命令，对比新值和旧值（特别是 `COSY_MACHINE_TOKEN`）。
 2. 如果值变了，更新 Worker 的环境变量并重新部署。
 3. 部署后访问 `$base/run` 验证。
 
@@ -272,7 +312,7 @@ Worker 会在 Token 过期前 72 小时自动续期，遇到 401 也会即时刷
 - **这是第三方非官方工具**，与 Qoder 没有任何关系，也没有得到它的背书。自动化领取属于对活动接口的手动重放，**可能不符合服务条款**，是否使用请自行判断并承担后果；请只用于你自己的账号。
 - Token 和 refreshToken 存在 Cloudflare KV 中（与你的 Cloudflare 账号绑定），`/status`、`/logs` 等公开页面**不会显示 Token 明文**。
 - 设备标识中的 `COSY_MACHINE_TOKEN` 建议设为 Secret（加密存储）。
-- 卸载：删除 Worker 和 KV Namespace 即可，不会在 Qoder 客户端留下任何东西（本工具的所有脚本都是只读的）。
+- 卸载：删除 Worker 和 KV Namespace 即可，不会在 Qoder 客户端留下任何东西（本工具的所有命令都是只读的）。
 
 ---
 
