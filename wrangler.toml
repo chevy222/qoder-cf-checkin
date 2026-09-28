@@ -1,0 +1,13 @@
+name = "qoder-checkin"
+main = "worker.js"
+compatibility_date = "2026-09-08"
+keep_vars = true
+
+# 每天北京时间 10:01 签到（UTC 02:01）。活动按 UTC+8 刷新，10:01 留出余量。
+# 想换时间：北京时间小时减 8 即 UTC 小时（负数加 24）。
+[triggers]
+crons = ["1 2 * * *"]
+
+[[kv_namespaces]]
+binding = "KV"
+id = "替换成你的 KV Namespace ID"
