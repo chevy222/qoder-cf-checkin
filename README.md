@@ -80,9 +80,10 @@ Cloudflare Worker 运行在云端，**无法运行 Windows exe**（Qoder 客户�
 
 ### 运行以下命令提取设备标识
 
-在装有 Qoder 桌面端的 Windows 上打开 PowerShell 7（`pwsh`），把下面整段复制进去回车：
+在装有 Qoder 桌面端的 Windows 上打开 PowerShell 7（`pwsh`），把下面整段复制进去回车。**如果 Qoder 装在非默认位置，先把第二行的 `#` 去掉并改成你的路径。**
 
 ```powershell
+& {
 # 如果 Qoder 装在非默认位置（如 D:\Program\Qoder CN），取消下面这行注释并改成你的路径：
 # $qoderRoot = "D:\Program\Qoder CN"
 
@@ -102,7 +103,7 @@ if (-not $qoderRoot) {
   $proc = Get-Process -Name "Qoder" -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($proc) { $qoderRoot = Split-Path $proc.Path -Parent }
 }
-if (-not $qoderRoot) { throw "未找到 Qoder 安装目录，请在脚本顶部取消注释并手动填写路径" }
+if (-not $qoderRoot) { throw "未找到 Qoder 安装目录，请在脚本顶部取消注释 $qoderRoot 并手动填写路径" }
 
 # 2. 运行 Qoder 自带的 runtime-info.exe（只读不写，客户端自己每小时也在跑它）
 $umidExe = Join-Path $qoderRoot "resources\umid\runtime-info.exe"
@@ -140,6 +141,7 @@ if ($ri.machineToken) { Write-Host "COSY_MACHINE_TOKEN    = $($ri.machineToken)"
 if ($ri.machineCode)  { Write-Host "COSY_MACHINE_CODE     = $($ri.machineCode)" }
 if ($ri.machineType)  { Write-Host "COSY_MACHINE_TYPE     = $($ri.machineType)" }
 Write-Host "==================================================" -ForegroundColor Green
+}
 ```
 
 命令会自动：
