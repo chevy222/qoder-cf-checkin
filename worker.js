@@ -22,13 +22,12 @@
 // 当天第几个改动就写几；跨天则换成当天日期、序号从 1 重新开始。
 // 页脚会显示它——配合自动部署时，刷新页面看这一行变没变，就知道新版本上线没有。
 // ============================================================
-const BUILD_VERSION = "20260929:1";
+const BUILD_VERSION = "20260929:2";
 
 // ============================================================
-// 常量（对齐 qoder_claim.py）
+// 常量（仅支持 Qoder CN 国内版）
 // ============================================================
-const DEFAULT_BASES = [          // 国际版 / 国内版，自动挑能用的那个
-  "https://openapi.qoder.sh",
+const DEFAULT_BASES = [          // 仅支持 Qoder CN（国内版）
   "https://openapi.qoder.com.cn",
 ];
 
@@ -202,7 +201,7 @@ function deviceHeaders(env) {
 }
 
 // ============================================================
-// Qoder API（对齐 qoder_claim.py：双端点自动探测 + 401 即时刷新）
+// Qoder API（仅 Qoder CN 国内版）
 // ============================================================
 function apiBases(env) {
   return env.QODER_API_BASE ? [env.QODER_API_BASE] : DEFAULT_BASES;
@@ -228,7 +227,7 @@ async function qoderFetch(env, path, method, token, body) {
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
       const text = await resp.text();
-      // 404/401/403 可能是端点不对（国际版 vs 国内版），继续试下一个
+      // 404/401/403 可能是端点不对，继续试下一个
       if (resp.status === 404 || resp.status === 401 || resp.status === 403) {
         last = { status: resp.status, body: text, base }; continue;
       }
@@ -243,7 +242,7 @@ async function qoderFetch(env, path, method, token, body) {
   return last;
 }
 
-// 用 refreshToken 换新 access token（对齐 qoder_claim.py 的 _try_refresh）
+// 用 refreshToken 换新 access token
 async function refreshQoderToken(env, refreshToken) {
   if (!refreshToken) return null;
   const bases = apiBases(env);
