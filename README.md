@@ -133,38 +133,50 @@ $cosyVersion = ""
 $mf = Join-Path $qoderRoot "resources\build-manifest.json"
 if (Test-Path $mf) { try { $cosyVersion = [string]((Get-Content $mf -Raw | ConvertFrom-Json).productVersion) } catch {} }
 
-# 3. 找 Qoder 数据目录（搜 %APPDATA% 和 %LOCALAPPDATA%，目录名含 qoder 即可；找不到就跳过，不影响设备标识）
+# 3. 找 Qoder 数据目录（搜 %APPDATA% / %LOCALAPPDATA% / %USERPROFILE%，含 .qoder-cn 这种点目录；找不到就跳过）
 $appDir = $null
 $foundDirs = @()
-foreach ($root in @($env:APPDATA, $env:LOCALAPPDATA) | Where-Object { $_ }) {
-    Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "qoder" } | ForEach-Object {
+foreach ($root in @($env:APPDATA, $env:LOCALAPPDATA, $env:USERPROFILE) | Where-Object { $_ }) {
+    Get-ChildItem $root -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "qoder" } | ForEach-Object {
         $foundDirs += $_.FullName
-        if ((Test-Path (Join-Path $_.FullName "auth.v1.dat")) -or (Test-Path (Join-Path $_.FullName "Local State"))) {
-            if (-not $appDir -or $_.LastWriteTime -gt $appDir.LastWriteTime) { $appDir = $_ }
-        }
+        $hasData = (Test-Path (Join-Path $_.FullName "auth.v1.dat")) -or
+                   (Test-Path (Join-Path $_.FullName "Local State")) -or
+                   (Test-Path (Join-Path $_.FullName "auth.machine-id")) -or
+                   (Test-Path (Join-Path $_.FullName ".auth\machine_id")) -or
+                   (Test-Path (Join-Path $_.FullName ".auth\auth.v1.dat")) -or
+                   (Test-Path (Join-Path $_.FullName ".auth\Local State"))
+        if ($hasData -and (-not $appDir -or $_.LastWriteTime -gt $appDir.LastWriteTime)) { $appDir = $_ }
     }
 }
 
-# 4. machine-id（可选，没有就跳过）
+# 4. machine-id（兼容 auth.machine-id 和 .auth\machine_id）
 $cosyMachineId = ""
 if ($appDir) {
-    $midFile = Join-Path $appDir.FullName "auth.machine-id"
-    if (Test-Path $midFile) { $cosyMachineId = (Get-Content $midFile -Raw).Trim() }
+    foreach ($candidate in @("auth.machine-id", ".auth\machine_id")) {
+        $f = Join-Path $appDir.FullName $candidate
+        if (Test-Path $f) { $cosyMachineId = (Get-Content $f -Raw).Trim(); break }
+    }
 }
 
 # 5. 架构
 $arch = if ($env:PROCESSOR_ARCHITECTURE -match "ARM|arm64|aarch64") { "aarch64" } else { "x86_64" }
 
-# 6. Token 解密（DPAPI + AES-256-GCM，Electron safeStorage 标准格式；找不到就跳过）
+# 6. Token 解密（DPAPI + AES-256-GCM；在根目录和 .auth 子目录都找 auth.v1.dat / Local State）
 $sess = $null
 $tokenNote = ""
 if ($appDir) {
-    $authFile = Join-Path $appDir.FullName "auth.v1.dat"
-    if (Test-Path $authFile) {
+    $authFile = $null
+    $stateFile = $null
+    foreach ($sub in @("", ".auth")) {
+        $af = if ($sub) { Join-Path $appDir.FullName "$sub\auth.v1.dat" } else { Join-Path $appDir.FullName "auth.v1.dat" }
+        $sf = if ($sub) { Join-Path $appDir.FullName "$sub\Local State" } else { Join-Path $appDir.FullName "Local State" }
+        if ((Test-Path $af) -and (Test-Path $sf)) { $authFile = $af; $stateFile = $sf; break }
+    }
+    if ($authFile) {
         try {
             $raw = [IO.File]::ReadAllBytes($authFile)
             if ($raw.Length -ge 60 -and [Text.Encoding]::ASCII.GetString($raw, 0, 3) -eq "v10") {
-                $st = Get-Content (Join-Path $appDir.FullName "Local State") -Raw -Encoding UTF8 | ConvertFrom-Json
+                $st = Get-Content $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json
                 $ek = [Convert]::FromBase64String($st.os_crypt.encrypted_key)
                 $key = [Dpapi]::Unprotect($ek[5..($ek.Length - 1)])
                 $nonce = $raw[3..14]; $ct = $raw[15..($raw.Length - 17)]; $tag = $raw[($raw.Length - 16)..($raw.Length - 1)]
@@ -175,8 +187,8 @@ if ($appDir) {
             }
         } catch { $tokenNote = "Token 解密出错：$($_.Exception.Message)" }
     } else {
-        $authFiles = Get-ChildItem $appDir.FullName -Filter "auth*" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
-        $tokenNote = "目录 $($appDir.Name) 里没有 auth.v1.dat，现有 auth* 文件：$($authFiles -join ', ')"
+        $allFiles = Get-ChildItem $appDir.FullName -Recurse -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+        $tokenNote = "目录 $($appDir.Name) 里没找到 auth.v1.dat+Local State。文件列表：$($allFiles -join ', ')"
     }
 } else {
     $tokenNote = "没找到 Qoder 数据目录。搜到的含 qoder 目录：$($foundDirs -join ', ')"
@@ -213,7 +225,7 @@ if ($sess -and $sess.token) {
 
 命令会输出：
 - **设备标识（COSY_*）**→ 下一步配到 Cloudflare 环境变量（这部分一定有）；
-- **登录凭据（TOKEN / REFRESH）**→ 如果能解出就一并输出，后面录入账号用；解不出会提示目录里实际有哪些 auth 文件，不影响设备标识。
+- **登录凭据（TOKEN / REFRESH）**→ 如果能解出就一并输出，后面录入账号用；解不出会提示目录里实际有哪些文件，不影响设备标识。
 
 设备标识变量说明：
 
@@ -225,7 +237,7 @@ if ($sess -and $sess.token) {
 | `COSY_MACHINE_TYPE` | runtime-info.exe | 设备类型 |
 | `COSY_MACHINE_OS` | 系统架构 | 如 `x86_64_windows` |
 | `COSY_MACHINE_HOSTNAME` | 本机主机名 | |
-| `COSY_MACHINE_ID` | auth.machine-id 文件 | |
+| `COSY_MACHINE_ID` | auth.machine-id / .auth\machine_id | |
 | `COSY_VERSION` | build-manifest.json | 客户端版本号 |
 
 > **设备标识的有效期是本方案唯一的不确定性。** 如果 `Cosy-MachineToken` 是长期有效的，配置一次即可一直用；如果它会过期，活动列表会突然变空，届时重新运行上面的命令提取并更新环境变量即可。详见[常见问题](#11-日常运维与常见问题)。
