@@ -80,14 +80,19 @@ Cloudflare Worker 运行在云端，**无法运行 Windows exe**（Qoder 客户�
 
 ### 运行以下命令一次性提取设备标识和 Token
 
-在装有 Qoder 桌面端的 Windows 上打开 PowerShell 7（`pwsh`），把下面整段复制进去。**先把第二行 `$qoderRoot` 改成你的 Qoder 安装目录（就是包含 `Qoder CN.exe` 的那个文件夹），再回车。**
+在装有 Qoder 桌面端的 Windows 上打开 PowerShell 7（`pwsh`）。
+
+**第一步：先设置 Qoder 安装路径**（就是包含 `Qoder CN.exe` 的那个文件夹，改成你自己的路径）：
+
+```powershell
+$qoderRoot = "D:\Program\Qoder CN"
+```
+
+**第二步：把下面整段复制进去回车**（脚本会读取上面设的 `$qoderRoot`，没设会报错提示）：
 
 ```powershell
 & {
-# 必填：Qoder 安装目录（包含 Qoder CN.exe 的文件夹，如 "D:\Program\Qoder CN"）
-$qoderRoot = ""
-
-if (-not $qoderRoot) { throw "请先设置 `$qoderRoot 为你的 Qoder 安装目录（包含 Qoder CN.exe 的文件夹）" }
+if (-not $qoderRoot) { throw "请先执行 `$qoderRoot = `"你的Qoder安装目录`" 设置路径" }
 
 # DPAPI 解密辅助（用于解 Token）
 Add-Type @"
