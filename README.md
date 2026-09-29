@@ -14,10 +14,10 @@
 ## 目录
 
 1. [准备工作](#1-准备工作)
-2. [第一步：创建 Worker 并粘贴代码](#2-第一步创建-worker-并粘贴代码)
-3. [第二步：创建 KV 并绑定](#3-第二步创建-kv-并绑定)
-4. [第三步：设置管理口令 ADMIN_TOKEN](#4-第三步设置管理口令-admin_token)
-5. [第四步：提取设备标识和 Token（关键）](#5-第四步提取设备标识和-token关键)
+2. [第一步：提取设备标识和 Token（关键）](#2-第一步提取设备标识和-token关键)
+3. [第二步：创建 Worker 并粘贴代码](#3-第二步创建-worker-并粘贴代码)
+4. [第三步：创建 KV 并绑定](#4-第三步创建-kv-并绑定)
+5. [第四步：设置管理口令 ADMIN_TOKEN](#5-第四步设置管理口令-admin_token)
 6. [第五步：配置设备标识环境变量](#6-第五步配置设备标识环境变量)
 7. [第六步：配置定时 Cron](#7-第六步配置定时-cron)
 8. [第七步：录入账号](#8-第七步录入账号)
@@ -37,42 +37,7 @@
 
 ---
 
-## 2. 第一步：创建 Worker 并粘贴代码
-
-1. 登录 Cloudflare 控制台，左侧进 **Workers & Pages** → **Create**（创建）→ 选 **Workers**（从 Hello World 模板开始即可）。
-2. 给 Worker 起个名，例如 `qoder-checkin`，点 **Deploy / 部署**。
-3. 部署后点 **Edit code / 编辑代码**，把编辑器里自带的内容**全部删掉**。
-4. 用文本编辑器打开本目录的 **`worker.js`**，全选复制，整段粘贴进网页编辑器。
-5. 点右上角 **Deploy / 部署**。
-
-部署成功后，访问 `$base/` 能看到首页（已配置账号、立即签到、运行日志、可用操作），就说明代码上线了（首页不执行任何签到任务）。
-
----
-
-## 3. 第二步：创建 KV 并绑定
-
-KV 是 Cloudflare 的键值存储，用来存凭证、运行状态和日志。
-
-1. 控制台左侧进 **Storage & Databases（存储和数据库）** → **KV** → **Create a namespace（创建命名空间）**，名字随意，例如 `QODER`，创建。
-2. 回到你刚建的 Worker → **Settings（设置）** → 找到 **Bindings（绑定）** → **Add（添加）** → 选 **KV namespace**。
-3. **变量名（Variable name）必须填 `KV`**（大写，代码里就认这个名字），命名空间选刚建的 `QODER`，保存。
-
-> 变量名填错（比如小写 `kv`）会导致运行时报错，务必是大写 `KV`。
-
----
-
-## 4. 第三步：设置管理口令 ADMIN_TOKEN
-
-只有"录入/删除凭证、手动刷新 Token"的三个接口（`/add`、`/remove`、`/refresh`）需要这个口令，防止别人往你的 KV 写入或删除凭证；查看状态 `/status`、手动签到 `/run`、日志 `/logs` 都是公开的，不需要口令。
-
-1. Worker → **Settings** → **Variables and Secrets（变量和机密）** → **Add**。
-2. 类型选 **Secret（加密/机密）**，名称填 **`ADMIN_TOKEN`**，值填一串你自己的口令（建议长一点、随机一点）。
-3. 保存并**重新部署一次**（部分情况下密钥需要重新部署才生效）。
-4. 同一个口令后面录入凭证时会填进终端的 `$token` 变量。
-
----
-
-## 5. 第四步：提取设备标识和 Token（关键）
+## 2. 第一步：提取设备标识和 Token（关键）
 
 这是**最容易踩坑、也最关键**的一步。2026-09-26 起，Qoder 服务端要求请求携带一组 `Cosy-*` 设备头才下发每日活动；缺了这些头（特别是 `Cosy-ClientType: 10`），活动列表会直接返回空。
 
@@ -82,13 +47,13 @@ Cloudflare Worker 运行在云端，**无法运行 Windows exe**（Qoder 客户�
 
 在装有 Qoder 桌面端的 Windows 上打开 PowerShell 7（`pwsh`）。
 
-**第一步：先设置 Qoder 安装路径**（就是包含 `Qoder CN.exe` 的那个文件夹，改成你自己的路径）：
+**先设置 Qoder 安装路径**（就是包含 `Qoder CN.exe` 的那个文件夹，改成你自己的路径）：
 
 ```powershell
 $qoderRoot = "D:\Program\Qoder CN"
 ```
 
-**第二步：把下面整段复制进去回车**（脚本会读取上面设的 `$qoderRoot`，没设会报错提示）：
+**把下面整段复制进去回车**（脚本会读取上面设的 `$qoderRoot`，没设会报错提示）：
 
 ```powershell
 & {
@@ -196,8 +161,8 @@ if ($sess -and $sess.token) {
 ```
 
 命令会输出：
-- **设备标识（COSY_*）**→ 下一步配到 Cloudflare 环境变量（这部分一定有）；
-- **登录凭据（TOKEN / REFRESH）**→ 如果能解出就一并输出，后面录入账号用；解不出会提示原因，不影响设备标识。
+- **设备标识（COSY_*）**→ 第五步配到 Cloudflare 环境变量（这部分一定有）；
+- **登录凭据（TOKEN / REFRESH）**→ 第七步录入账号用；解不出会提示原因，不影响设备标识。
 
 设备标识变量说明：
 
@@ -216,9 +181,44 @@ if ($sess -and $sess.token) {
 
 ---
 
+## 3. 第二步：创建 Worker 并粘贴代码
+
+1. 登录 Cloudflare 控制台，左侧进 **Workers & Pages** → **Create**（创建）→ 选 **Workers**（从 Hello World 模板开始即可）。
+2. 给 Worker 起个名，例如 `qoder-checkin`，点 **Deploy / 部署**。
+3. 部署后点 **Edit code / 编辑代码**，把编辑器里自带的内容**全部删掉**。
+4. 用文本编辑器打开本目录的 **`worker.js`**，全选复制，整段粘贴进网页编辑器。
+5. 点右上角 **Deploy / 部署**。
+
+部署成功后，访问 `$base/` 能看到首页（已配置账号、立即签到、运行日志、可用操作），就说明代码上线了（首页不执行任何签到任务）。
+
+---
+
+## 4. 第三步：创建 KV 并绑定
+
+KV 是 Cloudflare 的键值存储，用来存凭证、运行状态和日志。
+
+1. 控制台左侧进 **Storage & Databases（存储和数据库）** → **KV** → **Create a namespace（创建命名空间）**，名字随意，例如 `QODER`，创建。
+2. 回到你刚建的 Worker → **Settings（设置）** → 找到 **Bindings（绑定）** → **Add（添加）** → 选 **KV namespace**。
+3. **变量名（Variable name）必须填 `KV`**（大写，代码里就认这个名字），命名空间选刚建的 `QODER`，保存。
+
+> 变量名填错（比如小写 `kv`）会导致运行时报错，务必是大写 `KV`。
+
+---
+
+## 5. 第四步：设置管理口令 ADMIN_TOKEN
+
+只有"录入/删除凭证、手动刷新 Token"的三个接口（`/add`、`/remove`、`/refresh`）需要这个口令，防止别人往你的 KV 写入或删除凭证；查看状态 `/status`、手动签到 `/run`、日志 `/logs` 都是公开的，不需要口令。
+
+1. Worker → **Settings** → **Variables and Secrets（变量和机密）** → **Add**。
+2. 类型选 **Secret（加密/机密）**，名称填 **`ADMIN_TOKEN`**，值填一串你自己的口令（建议长一点、随机一点）。
+3. 保存并**重新部署一次**（部分情况下密钥需要重新部署才生效）。
+4. 同一个口令后面录入凭证时会填进终端的 `$token` 变量。
+
+---
+
 ## 6. 第五步：配置设备标识环境变量
 
-把上一步命令输出的所有变量配到 Worker 里：
+把第一步命令输出的所有变量配到 Worker 里：
 
 1. Worker → **Settings** → **Variables and Secrets** → **Add**。
 2. 逐个添加：
@@ -261,15 +261,15 @@ Cron 表达式按 **UTC 时间**执行，北京时间 = UTC+8（UTC 小时 = 北
 
 ## 8. 第七步：录入账号
 
-第四步已经取出了 `TOKEN` 和 `REFRESH`（如果第四步没解出 Token，需先用其他方式获取），直接录入 Worker 即可。
+第一步已经取出了 `TOKEN` 和 `REFRESH`，直接录入 Worker 即可。
 
-打开 PowerShell，初始化变量（把地址和口令替换成你自己的，地址结尾不要带斜杠；token 和 refreshToken 填第四步输出的值）：
+打开 PowerShell，初始化变量（把地址和口令替换成你自己的，地址结尾不要带斜杠；token 和 refreshToken 填第一步输出的值）：
 
 ```powershell
 $base  = "https://qoder-checkin.你的子域.workers.dev"
 $token = "你自己设定的管理口令"
-$accessToken = "第四步输出的 TOKEN"
-$refreshToken = "第四步输出的 REFRESH"
+$accessToken = "第一步输出的 TOKEN"
+$refreshToken = "第一步输出的 REFRESH"
 ```
 
 录入账号：
@@ -319,7 +319,7 @@ Invoke-RestMethod -Uri "$base/add" -Method Post `
 **首先怀疑设备标识过期。** 特别是 `Cosy-MachineToken` 如果是短期动态令牌，过期后服务端会拒绝下发活动。
 
 排查步骤：
-1. 在 Windows 上重新运行[第四步](#5-第四步提取设备标识和-token关键)里的那段 PowerShell 命令，对比新值和旧值（特别是 `COSY_MACHINE_TOKEN`）。
+1. 在 Windows 上重新运行[第一步](#2-第一步提取设备标识和-token关键)里的那段 PowerShell 命令，对比新值和旧值（特别是 `COSY_MACHINE_TOKEN`）。
 2. 如果值变了，更新 Worker 的环境变量并重新部署。
 3. 部署后访问 `$base/run` 验证。
 
@@ -327,7 +327,7 @@ Invoke-RestMethod -Uri "$base/add" -Method Post `
 
 ### Token 失效 / 401
 
-Worker 会在 Token 过期前 72 小时自动续期，遇到 401 也会即时刷新。如果刷新失败（refreshToken 也失效了），`/status` 会显示「需重新登录」，此时需要重新走[第四步](#5-第四步提取设备标识和-token关键)取出新 token 并 `/add` 更新。
+Worker 会在 Token 过期前 72 小时自动续期，遇到 401 也会即时刷新。如果刷新失败（refreshToken 也失效了），`/status` 会显示「需重新登录」，此时需要重新走[第一步](#2-第一步提取设备标识和-token关键)取出新 token 并 `/add` 更新。
 
 也可以手动触发刷新：`Invoke-RestMethod -Uri "$base/refresh" -Headers @{ "X-Admin-Token" = $token }`。
 
