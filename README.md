@@ -128,12 +128,15 @@ $cosyVersion = ""
 $mf = Join-Path $qoderRoot "resources\build-manifest.json"
 if (Test-Path $mf) { try { $cosyVersion = [string]((Get-Content $mf -Raw | ConvertFrom-Json).productVersion) } catch {} }
 
-# 3. 找 %APPDATA%\com.qoder.app.*（machine-id 和 Token 都在这个目录）
+# 3. 找 %APPDATA%\com.qoder.app.*（按 auth.machine-id 定位，machine-id 和 Token 都在这个目录）
 $appDir = Get-ChildItem $env:APPDATA -Filter "com.qoder.app.*" -Directory -ErrorAction SilentlyContinue |
   Sort-Object LastWriteTime -Descending |
-  Where-Object { Test-Path (Join-Path $_.FullName "auth.v1.dat") } |
+  Where-Object { Test-Path (Join-Path $_.FullName "auth.machine-id") } |
   Select-Object -First 1
-if (-not $appDir) { throw "没找到 $env:APPDATA\com.qoder.app.*\auth.v1.dat，Qoder 桌面端登录过吗？" }
+if (-not $appDir) {
+  $all = Get-ChildItem $env:APPDATA -Filter "com.qoder.app.*" -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
+  throw "没找到含 auth.machine-id 的 Qoder 目录。现有 com.qoder.app.* 目录：$($all -join ', ')"
+}
 
 # 4. machine-id
 $cosyMachineId = ""
@@ -143,21 +146,28 @@ if (Test-Path $midFile) { $cosyMachineId = (Get-Content $midFile -Raw).Trim() }
 # 5. 架构
 $arch = if ($env:PROCESSOR_ARCHITECTURE -match "ARM|arm64|aarch64") { "aarch64" } else { "x86_64" }
 
-# 6. Token 解密（DPAPI + AES-256-GCM，Electron safeStorage 标准格式）
+# 6. Token 解密（DPAPI + AES-256-GCM，Electron safeStorage 标准格式；找不到就跳过，不影响设备标识）
 $sess = $null
-try {
-    $raw = [IO.File]::ReadAllBytes((Join-Path $appDir.FullName "auth.v1.dat"))
-    if ($raw.Length -ge 60 -and [Text.Encoding]::ASCII.GetString($raw, 0, 3) -eq "v10") {
-        $st = Get-Content (Join-Path $appDir.FullName "Local State") -Raw -Encoding UTF8 | ConvertFrom-Json
-        $ek = [Convert]::FromBase64String($st.os_crypt.encrypted_key)
-        $key = [Dpapi]::Unprotect($ek[5..($ek.Length - 1)])
-        $nonce = $raw[3..14]; $ct = $raw[15..($raw.Length - 17)]; $tag = $raw[($raw.Length - 16)..($raw.Length - 1)]
-        $pt = New-Object byte[] $ct.Length
-        $gcm = [System.Security.Cryptography.AesGcm]::new($key)
-        $gcm.Decrypt($nonce, $ct, $tag, $pt)
-        $sess = [Text.Encoding]::UTF8.GetString($pt) | ConvertFrom-Json
-    }
-} catch {}
+$tokenNote = ""
+$authFile = Join-Path $appDir.FullName "auth.v1.dat"
+if (Test-Path $authFile) {
+    try {
+        $raw = [IO.File]::ReadAllBytes($authFile)
+        if ($raw.Length -ge 60 -and [Text.Encoding]::ASCII.GetString($raw, 0, 3) -eq "v10") {
+            $st = Get-Content (Join-Path $appDir.FullName "Local State") -Raw -Encoding UTF8 | ConvertFrom-Json
+            $ek = [Convert]::FromBase64String($st.os_crypt.encrypted_key)
+            $key = [Dpapi]::Unprotect($ek[5..($ek.Length - 1)])
+            $nonce = $raw[3..14]; $ct = $raw[15..($raw.Length - 17)]; $tag = $raw[($raw.Length - 16)..($raw.Length - 1)]
+            $pt = New-Object byte[] $ct.Length
+            $gcm = [System.Security.Cryptography.AesGcm]::new($key)
+            $gcm.Decrypt($nonce, $ct, $tag, $pt)
+            $sess = [Text.Encoding]::UTF8.GetString($pt) | ConvertFrom-Json
+        }
+    } catch { $tokenNote = "Token 解密出错：$($_.Exception.Message)" }
+} else {
+    $authFiles = Get-ChildItem $appDir.FullName -Filter "auth*" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
+    $tokenNote = "目录里没有 auth.v1.dat，现有 auth* 文件：$($authFiles -join ', ')。Token 需另行提取。"
+}
 
 # === 输出设备标识 ===
 Write-Host ""
@@ -182,14 +192,15 @@ if ($sess -and $sess.token) {
     Write-Host "======================================" -ForegroundColor Cyan
 } else {
     Write-Host ""
-    Write-Host "（Token 解密失败，可检查 Qoder 是否处于登录状态）" -ForegroundColor Yellow
+    Write-Host "（Token 未提取到——$tokenNote）" -ForegroundColor Yellow
+    Write-Host "设备标识已正常输出，不影响签到配置。" -ForegroundColor Yellow
 }
 }
 ```
 
-命令会输出两部分：
-- **设备标识（COSY_*）**→ 下一步配到 Cloudflare 环境变量；
-- **登录凭据（TOKEN / REFRESH）**→ 后面录入账号用。
+命令会输出：
+- **设备标识（COSY_*）**→ 下一步配到 Cloudflare 环境变量（这部分一定有）；
+- **登录凭据（TOKEN / REFRESH）**→ 如果能解出就一并输出，后面录入账号用；解不出会提示目录里实际有哪些 auth 文件，不影响设备标识。
 
 设备标识变量说明：
 
@@ -253,7 +264,7 @@ Cron 表达式按 **UTC 时间**执行，北京时间 = UTC+8（UTC 小时 = 北
 
 ## 8. 第七步：录入账号
 
-第四步已经取出了 `TOKEN` 和 `REFRESH`，直接录入 Worker 即可。
+第四步已经取出了 `TOKEN` 和 `REFRESH`（如果第四步没解出 Token，需先用其他方式获取），直接录入 Worker 即可。
 
 打开 PowerShell，初始化变量（把地址和口令替换成你自己的，地址结尾不要带斜杠；token 和 refreshToken 填第四步输出的值）：
 
