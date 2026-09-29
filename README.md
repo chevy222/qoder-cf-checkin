@@ -133,45 +133,53 @@ $cosyVersion = ""
 $mf = Join-Path $qoderRoot "resources\build-manifest.json"
 if (Test-Path $mf) { try { $cosyVersion = [string]((Get-Content $mf -Raw | ConvertFrom-Json).productVersion) } catch {} }
 
-# 3. 找 %APPDATA%\com.qoder.app.*（按 auth.machine-id 定位，machine-id 和 Token 都在这个目录）
-$appDir = Get-ChildItem $env:APPDATA -Filter "com.qoder.app.*" -Directory -ErrorAction SilentlyContinue |
-  Sort-Object LastWriteTime -Descending |
-  Where-Object { Test-Path (Join-Path $_.FullName "auth.machine-id") } |
-  Select-Object -First 1
-if (-not $appDir) {
-  $all = Get-ChildItem $env:APPDATA -Filter "com.qoder.app.*" -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
-  throw "没找到含 auth.machine-id 的 Qoder 目录。现有 com.qoder.app.* 目录：$($all -join ', ')"
+# 3. 找 Qoder 数据目录（搜 %APPDATA% 和 %LOCALAPPDATA%，目录名含 qoder 即可；找不到就跳过，不影响设备标识）
+$appDir = $null
+$foundDirs = @()
+foreach ($root in @($env:APPDATA, $env:LOCALAPPDATA) | Where-Object { $_ }) {
+    Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "qoder" } | ForEach-Object {
+        $foundDirs += $_.FullName
+        if ((Test-Path (Join-Path $_.FullName "auth.v1.dat")) -or (Test-Path (Join-Path $_.FullName "Local State"))) {
+            if (-not $appDir -or $_.LastWriteTime -gt $appDir.LastWriteTime) { $appDir = $_ }
+        }
+    }
 }
 
-# 4. machine-id
+# 4. machine-id（可选，没有就跳过）
 $cosyMachineId = ""
-$midFile = Join-Path $appDir.FullName "auth.machine-id"
-if (Test-Path $midFile) { $cosyMachineId = (Get-Content $midFile -Raw).Trim() }
+if ($appDir) {
+    $midFile = Join-Path $appDir.FullName "auth.machine-id"
+    if (Test-Path $midFile) { $cosyMachineId = (Get-Content $midFile -Raw).Trim() }
+}
 
 # 5. 架构
 $arch = if ($env:PROCESSOR_ARCHITECTURE -match "ARM|arm64|aarch64") { "aarch64" } else { "x86_64" }
 
-# 6. Token 解密（DPAPI + AES-256-GCM，Electron safeStorage 标准格式；找不到就跳过，不影响设备标识）
+# 6. Token 解密（DPAPI + AES-256-GCM，Electron safeStorage 标准格式；找不到就跳过）
 $sess = $null
 $tokenNote = ""
-$authFile = Join-Path $appDir.FullName "auth.v1.dat"
-if (Test-Path $authFile) {
-    try {
-        $raw = [IO.File]::ReadAllBytes($authFile)
-        if ($raw.Length -ge 60 -and [Text.Encoding]::ASCII.GetString($raw, 0, 3) -eq "v10") {
-            $st = Get-Content (Join-Path $appDir.FullName "Local State") -Raw -Encoding UTF8 | ConvertFrom-Json
-            $ek = [Convert]::FromBase64String($st.os_crypt.encrypted_key)
-            $key = [Dpapi]::Unprotect($ek[5..($ek.Length - 1)])
-            $nonce = $raw[3..14]; $ct = $raw[15..($raw.Length - 17)]; $tag = $raw[($raw.Length - 16)..($raw.Length - 1)]
-            $pt = New-Object byte[] $ct.Length
-            $gcm = [System.Security.Cryptography.AesGcm]::new($key)
-            $gcm.Decrypt($nonce, $ct, $tag, $pt)
-            $sess = [Text.Encoding]::UTF8.GetString($pt) | ConvertFrom-Json
-        }
-    } catch { $tokenNote = "Token 解密出错：$($_.Exception.Message)" }
+if ($appDir) {
+    $authFile = Join-Path $appDir.FullName "auth.v1.dat"
+    if (Test-Path $authFile) {
+        try {
+            $raw = [IO.File]::ReadAllBytes($authFile)
+            if ($raw.Length -ge 60 -and [Text.Encoding]::ASCII.GetString($raw, 0, 3) -eq "v10") {
+                $st = Get-Content (Join-Path $appDir.FullName "Local State") -Raw -Encoding UTF8 | ConvertFrom-Json
+                $ek = [Convert]::FromBase64String($st.os_crypt.encrypted_key)
+                $key = [Dpapi]::Unprotect($ek[5..($ek.Length - 1)])
+                $nonce = $raw[3..14]; $ct = $raw[15..($raw.Length - 17)]; $tag = $raw[($raw.Length - 16)..($raw.Length - 1)]
+                $pt = New-Object byte[] $ct.Length
+                $gcm = [System.Security.Cryptography.AesGcm]::new($key)
+                $gcm.Decrypt($nonce, $ct, $tag, $pt)
+                $sess = [Text.Encoding]::UTF8.GetString($pt) | ConvertFrom-Json
+            }
+        } catch { $tokenNote = "Token 解密出错：$($_.Exception.Message)" }
+    } else {
+        $authFiles = Get-ChildItem $appDir.FullName -Filter "auth*" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
+        $tokenNote = "目录 $($appDir.Name) 里没有 auth.v1.dat，现有 auth* 文件：$($authFiles -join ', ')"
+    }
 } else {
-    $authFiles = Get-ChildItem $appDir.FullName -Filter "auth*" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
-    $tokenNote = "目录里没有 auth.v1.dat，现有 auth* 文件：$($authFiles -join ', ')。Token 需另行提取。"
+    $tokenNote = "没找到 Qoder 数据目录。搜到的含 qoder 目录：$($foundDirs -join ', ')"
 }
 
 # === 输出设备标识 ===
