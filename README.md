@@ -115,6 +115,8 @@ public class Dpapi {
 }
 "@
 
+$dataDir = Join-Path $env:APPDATA "com.qodercn.app.stable"
+
 # 1. runtime-info.exe（设备标识）
 $umidExe = Join-Path $qoderRoot "resources\umid\runtime-info.exe"
 if (-not (Test-Path $umidExe)) { throw "找不到 $umidExe，请检查 `$qoderRoot 是否正确" }
@@ -133,65 +135,35 @@ $cosyVersion = ""
 $mf = Join-Path $qoderRoot "resources\build-manifest.json"
 if (Test-Path $mf) { try { $cosyVersion = [string]((Get-Content $mf -Raw | ConvertFrom-Json).productVersion) } catch {} }
 
-# 3. 找 Qoder 桌面端数据目录（优先找含 auth.v1.dat + Local State 的目录，即 token 所在）
-$appDir = $null
-$foundDirs = @()
-$allQoderDirs = @()
-foreach ($root in @($env:APPDATA, $env:LOCALAPPDATA, $env:USERPROFILE) | Where-Object { $_ }) {
-    Get-ChildItem $root -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "qoder" } | ForEach-Object {
-        $foundDirs += $_.FullName
-        $allQoderDirs += $_
-        $hasToken = (Test-Path (Join-Path $_.FullName "auth.v1.dat")) -and (Test-Path (Join-Path $_.FullName "Local State"))
-        if ($hasToken -and (-not $appDir -or $_.LastWriteTime -gt $appDir.LastWriteTime)) { $appDir = $_ }
-    }
-}
-# 没找到含 token 的目录时，退而求其次（只用于 machine-id）
-if (-not $appDir) {
-    foreach ($d in $allQoderDirs) {
-        if ((Test-Path (Join-Path $d.FullName "auth.machine-id")) -or (Test-Path (Join-Path $d.FullName ".auth\machine_id"))) {
-            if (-not $appDir -or $d.LastWriteTime -gt $appDir.LastWriteTime) { $appDir = $d }
-        }
-    }
-}
-
-# 4. machine-id（桌面端 auth.machine-id 或 CLI 端 .auth\machine_id，两个地方都找）
+# 3. machine-id
 $cosyMachineId = ""
-foreach ($d in $allQoderDirs) {
-    foreach ($candidate in @("auth.machine-id", ".auth\machine_id")) {
-        $f = Join-Path $d.FullName $candidate
-        if (Test-Path $f) { $cosyMachineId = (Get-Content $f -Raw).Trim(); break }
-    }
-    if ($cosyMachineId) { break }
-}
+$midFile = Join-Path $dataDir "auth.machine-id"
+if (Test-Path $midFile) { $cosyMachineId = (Get-Content $midFile -Raw).Trim() }
 
-# 5. 架构
+# 4. 架构
 $arch = if ($env:PROCESSOR_ARCHITECTURE -match "ARM|arm64|aarch64") { "aarch64" } else { "x86_64" }
 
-# 6. Token 解密（DPAPI + AES-256-GCM，Electron safeStorage 标准格式）
+# 5. Token 解密（DPAPI + AES-256-GCM）
 $sess = $null
 $tokenNote = ""
-if ($appDir) {
-    $authFile = Join-Path $appDir.FullName "auth.v1.dat"
-    $stateFile = Join-Path $appDir.FullName "Local State"
-    if ((Test-Path $authFile) -and (Test-Path $stateFile)) {
-        try {
-            $raw = [IO.File]::ReadAllBytes($authFile)
-            if ($raw.Length -ge 60 -and [Text.Encoding]::ASCII.GetString($raw, 0, 3) -eq "v10") {
-                $st = Get-Content $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json
-                $ek = [Convert]::FromBase64String($st.os_crypt.encrypted_key)
-                $key = [Dpapi]::Unprotect($ek[5..($ek.Length - 1)])
-                $nonce = $raw[3..14]; $ct = $raw[15..($raw.Length - 17)]; $tag = $raw[($raw.Length - 16)..($raw.Length - 1)]
-                $pt = New-Object byte[] $ct.Length
-                $gcm = [System.Security.Cryptography.AesGcm]::new($key)
-                $gcm.Decrypt($nonce, $ct, $tag, $pt)
-                $sess = [Text.Encoding]::UTF8.GetString($pt) | ConvertFrom-Json
-            }
-        } catch { $tokenNote = "Token 解密出错：$($_.Exception.Message)" }
-    } else {
-        $tokenNote = "目录 $($appDir.Name) 里没有 auth.v1.dat+Local State（可能只是 CLI 数据目录，桌面端登录态在 %APPDATA%\\com.qodercn.app.stable）"
-    }
+$authFile = Join-Path $dataDir "auth.v1.dat"
+$stateFile = Join-Path $dataDir "Local State"
+if ((Test-Path $authFile) -and (Test-Path $stateFile)) {
+    try {
+        $raw = [IO.File]::ReadAllBytes($authFile)
+        if ($raw.Length -ge 60 -and [Text.Encoding]::ASCII.GetString($raw, 0, 3) -eq "v10") {
+            $st = Get-Content $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            $ek = [Convert]::FromBase64String($st.os_crypt.encrypted_key)
+            $key = [Dpapi]::Unprotect($ek[5..($ek.Length - 1)])
+            $nonce = $raw[3..14]; $ct = $raw[15..($raw.Length - 17)]; $tag = $raw[($raw.Length - 16)..($raw.Length - 1)]
+            $pt = New-Object byte[] $ct.Length
+            $gcm = [System.Security.Cryptography.AesGcm]::new($key)
+            $gcm.Decrypt($nonce, $ct, $tag, $pt)
+            $sess = [Text.Encoding]::UTF8.GetString($pt) | ConvertFrom-Json
+        }
+    } catch { $tokenNote = "Token 解密出错：$($_.Exception.Message)" }
 } else {
-    $tokenNote = "没找到 Qoder 数据目录。搜到的含 qoder 目录：$($foundDirs -join ', ')"
+    $tokenNote = "找不到 $dataDir\\auth.v1.dat 或 Local State，Qoder 桌面端登录过吗？"
 }
 
 # === 输出设备标识 ===
@@ -211,7 +183,7 @@ Write-Host "==================================================" -ForegroundColor
 if ($sess -and $sess.token) {
     Write-Host ""
     Write-Host "====== 登录凭据（后面录入账号用）======" -ForegroundColor Cyan
-    Write-Host "已读取：$($appDir.Name)（有效期至 $($sess.expiresAt)）"
+    Write-Host "已读取：com.qodercn.app.stable（有效期至 $($sess.expiresAt)）"
     Write-Host "TOKEN:$($sess.token)"
     Write-Host "REFRESH:$($sess.refreshToken)"
     Write-Host "======================================" -ForegroundColor Cyan
@@ -237,7 +209,7 @@ if ($sess -and $sess.token) {
 | `COSY_MACHINE_TYPE` | runtime-info.exe | 设备类型 |
 | `COSY_MACHINE_OS` | 系统架构 | 如 `x86_64_windows` |
 | `COSY_MACHINE_HOSTNAME` | 本机主机名 | |
-| `COSY_MACHINE_ID` | auth.machine-id / .auth\machine_id | |
+| `COSY_MACHINE_ID` | com.qodercn.app.stable\auth.machine-id | |
 | `COSY_VERSION` | build-manifest.json | 客户端版本号 |
 
 > **设备标识的有效期是本方案唯一的不确定性。** 如果 `Cosy-MachineToken` 是长期有效的，配置一次即可一直用；如果它会过期，活动列表会突然变空，届时重新运行上面的命令提取并更新环境变量即可。详见[常见问题](#11-日常运维与常见问题)。
